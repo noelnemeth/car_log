@@ -12,6 +12,8 @@ nbproject
 .project
 .settings
 
+db.sqlite
+
 # windows thumbnail cache
 Thumbs.db
 
