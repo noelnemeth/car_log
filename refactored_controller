@@ -1,0 +1,290 @@
+<?php
+
+namespace frontend\controllers;
+
+use common\models\Ticket;
+use frontend\models\TicketSearch;
+use common\models\User;
+use common\models\TicketComment;
+use yii\web\Controller;
+use yii\web\NotFoundHttpException;
+use yii\filters\VerbFilter;
+use yii\helpers\ArrayHelper;
+use yii\filters\AccessControl;
+use Yii;
+use yii\web\UploadedFile;
+
+/**
+ * TicketController implements the CRUD actions for Ticket model.
+ */
+class TicketController extends Controller
+{
+    /**
+     * @inheritDoc
+     */
+    public function behaviors()
+    {
+        return array_merge(
+            parent::behaviors(),
+            [
+                'access' => [
+                    'class' => AccessControl::class,
+                    'rules' => [
+                        [
+                            'actions' => ['index', 'view', 'create', 'update', 'delete', 'assign', 'closeticket'],
+                            'allow' => true,
+                            'roles' => ['@'],
+                            'denyCallback' => function ($rule, $action) {
+                                Yii::$app->session->setFlash('error', 'You are not allowed here!');
+                                return Yii::$app->response->redirect(['site/login']);
+                            }
+                        ],
+                    ],
+                ],
+                'verbs' => [
+                    'class' => VerbFilter::className(),
+                    'actions' => [
+                        'delete' => ['POST'],
+                        'closeticket' => ['POST'],
+                        'assign' => ['POST'],
+                    ],
+                ],
+            ]
+        );
+    }
+
+    /**
+     * Lists all Ticket models.
+     *
+     * @return string
+     */
+    public function actionIndex()
+    {
+        $searchModel = new TicketSearch();
+        $dataProvider = $searchModel->search($this->request->queryParams);
+
+        return $this->render('index', [
+            'searchModel' => $searchModel,
+            'dataProvider' => $dataProvider,
+        ]);
+    }
+
+    /**
+     * Displays a single Ticket model.
+     * @param int $id ID
+     * @return mixed
+     * @throws NotFoundHttpException if the model cannot be found
+     */
+    public function actionView($id)
+    {
+        // Ha nincs meg / nem az övé, itt azonnal 404-et dob, nem nyeljük el.
+        $model = $this->findOwnedModel($id);
+
+        $commentModel = new TicketComment();
+
+        if ($commentModel->load(Yii::$app->request->post())) {
+            $commentModel->ticket_id = $model->id;
+
+            try {
+                if ($commentModel->save()) {
+                    if ($model->status === 1) {
+                        $model->status = 0;
+                        $model->save(false);
+                    }
+
+                    Yii::$app->session->setFlash('success', 'The comment is posted successfully.');
+                    Yii::info('A comment is posted successfully.', __METHOD__);
+                    return $this->refresh();
+                }
+
+                Yii::$app->session->setFlash('error', 'Failed to post comment.');
+                Yii::error('An error occured during comment posting.', __METHOD__);
+            } catch (\Throwable $e) {
+                Yii::$app->session->setFlash('error', 'An error occurred. Please try again later.');
+                Yii::error($e->getMessage(), __METHOD__);
+            }
+        }
+
+        return $this->render('view', [
+            'model' => $model,
+            'commentModel' => $commentModel,
+        ]);
+    }
+
+    /**
+     * Creates a new Ticket model.
+     * If creation is successful, the browser will be redirected to the 'view' page.
+     * @return string|\yii\web\Response
+     */
+    public function actionCreate()
+    {
+        $model = new Ticket();
+
+        if ($model->load(Yii::$app->request->post())) {
+            // A fájlt MÉG a save() előtt kérjük le, hogy validálni is tudjuk.
+            $model->imageFile = UploadedFile::getInstance($model, 'imageFile');
+
+            try {
+                if ($model->save()) {
+                    Yii::$app->session->setFlash('success', 'Ticket created successfully');
+                    Yii::info('Ticket create was successfull', __METHOD__);
+
+                    if ($model->imageFile && $model->upload()) {
+                        $model->save(false);
+                        Yii::$app->session->setFlash('success', 'kep mentese sikeres');
+                        Yii::info('kep mentese sikeres', __METHOD__);
+                    }
+
+                    return $this->redirect(['view', 'id' => $model->id]);
+                }
+            } catch (\Throwable $e) {
+                Yii::$app->session->setFlash('error', 'An error occurred. Please try again later.');
+                Yii::error($e->getMessage(), __METHOD__);
+            }
+        } else {
+            $model->loadDefaultValues();
+        }
+
+        return $this->render('create', [
+            'model' => $model,
+        ]);
+    }
+
+    /**
+     * Assigns an admin to a ticket
+     * @return mixed
+     */
+    public function actionAssign($id)
+    {
+        // Csak a saját ticketjéhez rendelhet adminot.
+        $model = $this->findOwnedModel($id);
+        $admins = ArrayHelper::map(User::find()->where(['is_admin' => true])->all(), 'id', 'username');
+
+        if ($model->load(Yii::$app->request->post())) {
+            try {
+                if ($model->save()) {
+                    Yii::$app->session->setFlash('success', 'Admin assigned successfully.');
+                    Yii::info('Admin assigned successfully.', __METHOD__);
+                    return $this->redirect(['view', 'id' => $model->id]);
+                }
+
+                Yii::$app->session->setFlash('error', 'Admin assign failed');
+                Yii::error('Admin assign failed', __METHOD__);
+            } catch (\Throwable $e) {
+                Yii::$app->session->setFlash('error', 'An error occurred. Please try again later.');
+                Yii::error($e->getMessage(), __METHOD__);
+            }
+        }
+
+        return $this->render('_form', [
+            'model' => $model,
+            'admins' => $admins,
+        ]);
+    }
+
+    /**
+     * Closing a ticket
+     *
+     * @return mixed
+     */
+    public function actionCloseticket($id)
+    {
+        $ticket = $this->findOwnedModel($id);
+
+        if ($ticket->status !== 0) {
+            Yii::$app->session->setFlash('error', 'The ticket is already closed.');
+            return $this->redirect(['index']);
+        }
+
+        $ticket->status = 1;
+
+        try {
+            if ($ticket->save()) {
+                Yii::$app->session->setFlash('success', 'Ticket has been closed successfully.');
+                Yii::info('Ticket has been closed successfully.', __METHOD__);
+            } else {
+                Yii::$app->session->setFlash('error', 'Unable to close the ticket.');
+                Yii::error('Unable to close the ticket.', __METHOD__);
+            }
+        } catch (\Throwable $e) {
+            Yii::$app->session->setFlash('error', 'An error occurred. Please try again later.');
+            Yii::error($e->getMessage(), __METHOD__);
+        }
+
+        return $this->redirect(['index']);
+    }
+
+    /**
+     * Updates an existing Ticket model.
+     * @param int $id ID
+     * @return string|\yii\web\Response
+     * @throws NotFoundHttpException if the model cannot be found
+     */
+    public function actionUpdate($id)
+    {
+        $model = $this->findOwnedModel($id);
+
+        if ($this->request->isPost && $model->load($this->request->post())) {
+            try {
+                if ($model->save()) {
+                    Yii::$app->session->setFlash('success', 'Ticket update was successfull');
+                    Yii::info('Ticket update was successfull', __METHOD__);
+                    return $this->redirect(['view', 'id' => $model->id]);
+                }
+
+                Yii::$app->session->setFlash('error', 'Ticket update failed.');
+            } catch (\Throwable $e) {
+                Yii::$app->session->setFlash('error', 'An error occurred. Please try again later.');
+                Yii::error($e->getMessage(), __METHOD__);
+            }
+        }
+
+        return $this->render('update', [
+            'model' => $model,
+        ]);
+    }
+
+    /**
+     * Deletes an existing Ticket model.
+     * If deletion is successful, the browser will be redirected to the 'index' page.
+     * @param int $id ID
+     * @return \yii\web\Response
+     * @throws NotFoundHttpException if the model cannot be found
+     */
+    public function actionDelete($id)
+    {
+        $ticket = $this->findOwnedModel($id);
+
+        try {
+            $ticket->delete();
+            Yii::$app->session->setFlash('success', 'Ticket delete was successfull');
+            Yii::info('Ticket delete was successfull', __METHOD__);
+        } catch (\Throwable $e) {
+            Yii::$app->session->setFlash('error', 'An error occurred. Please try again later.');
+            Yii::error($e->getMessage(), __METHOD__);
+        }
+
+        return $this->redirect(['index']);
+    }
+
+    /**
+     * Finds the Ticket model belonging to the current user, based on its primary key value.
+     * If the model is not found (or doesn't belong to the user), a 404 HTTP exception will be thrown.
+     * @param int $id ID
+     * @return Ticket the loaded model
+     * @throws NotFoundHttpException if the model cannot be found
+     */
+    protected function findOwnedModel($id)
+    {
+        $model = Ticket::findOne([
+            'id' => $id,
+            'user_id' => Yii::$app->user->id,
+        ]);
+
+        if ($model === null) {
+            throw new NotFoundHttpException('The requested page does not exist.');
+        }
+
+        return $model;
+    }
+}
